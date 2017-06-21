@@ -24,11 +24,14 @@ object Status {
                 } else {
                   ul(
                     runner.tasks.zipWithIndex.map {
-                      case (snippetId, j) =>
+                      case (taskStatus, j) =>
+                        val snippetId = taskStatus.snippetId
                         li(key := snippetId.toString)(
+                          s"taskId: ${taskStatus.taskId.id} snippet ",
                           props.router.link(Page.fromSnippetId(snippetId))(
-                            s"Task $j"
-                          )
+                            snippetId.base64UUID
+                          ),
+                          s" from user: ${taskStatus.user.getOrElse("anonymous")}"
                         )
                     }.toTagMod
                   )

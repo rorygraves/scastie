@@ -1,9 +1,6 @@
-package com.olegych.scastie
-package api
+package com.olegych.scastie.api
 
-case object SbtPing
-case object SbtPong
-
+case class TaskId(id : Int)
 case class SnippetUserPart(login: String, update: Option[Int])
 case class SnippetId(base64UUID: String, user: Option[SnippetUserPart]) {
   def isOwnedBy(user2: Option[User]): Boolean = {
@@ -44,23 +41,24 @@ object User {
   )
 }
 case class User(login: String, name: Option[String], avatar_url: String) {
-  def isAdmin = User.admins.contains(login)
+  def isAdmin: Boolean = User.admins.contains(login)
 }
 
 case class SnippetSummary(snippetId: SnippetId, summary: String, time: Long)
 
+trait Request
+sealed trait Response
+
 case class FormatRequest(code: String,
                          worksheetMode: Boolean,
-                         targetType: ScalaTargetType)
-case class FormatResponse(formattedCode: Either[String, String])
+                         targetType: ScalaTargetType) extends Request
+case class FormatResponse(formattedCode: Either[String, String]) extends Response
 
-sealed trait EnsimeRequest
-case class CompletionRequest(inputs: Inputs, position: Int)
-    extends EnsimeRequest
-case class CompletionResponse(completions: List[Completion])
-case class TypeAtPointRequest(inputs: Inputs, position: Int)
-    extends EnsimeRequest
-case class TypeAtPointResponse(typeInfo: String)
+sealed trait EnsimeRequest extends Request
+case class CompletionRequest(inputs: Inputs, position: Int) extends EnsimeRequest
+case class CompletionResponse(completions: List[Completion]) extends Response
+case class TypeAtPointRequest(inputs: Inputs, position: Int) extends EnsimeRequest
+case class TypeAtPointResponse(typeInfo: String) extends Response
 
 case class FetchResult(inputs: Inputs, progresses: List[SnippetProgress])
 

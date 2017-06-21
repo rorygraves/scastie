@@ -1,8 +1,10 @@
-package com.olegych.scastie
-package sbt
+package com.olegych.scastie.sbt
 
-import api._
-import akka.actor.{Actor, ActorSystem, Props}
+import akka.actor.{Actor, ActorSystem}
+import com.olegych.scastie.api._
+import com.olegych.scastie.backendapi.{SbtPing, SbtPong}
+import com.olegych.scastie.{NoUserAndGroup, SbtTask, SomeUserAndGroup}
+import org.slf4j.LoggerFactory
 
 import scala.concurrent.duration._
 
@@ -12,20 +14,30 @@ class SbtActor(system: ActorSystem,
                withEnsime: Boolean)
     extends Actor {
 
-  val formatActor =
-    context.actorOf(Props(new FormatActor()), name = "FormatActor")
+  private val log = LoggerFactory.getLogger(getClass)
 
-  val sbtRunner =
+  private val formatActor =
+    context.actorOf(FormatActor.props, name = "FormatActor")
+
+  private val sbtRunner =
     context.actorOf(
-      Props(new SbtRunner(runTimeout, production)),
+      SbtRunner.props(runTimeout, production),
       name = "SbtRunner"
     )
 
-  val ensimeActor =
+  private val ensimeActor =
     if (withEnsime) {
+
+      val ensimeUserAndGroup = Env.ensimeUser match {
+        case Some(user) =>
+          SomeUserAndGroup(user,user)
+        case None => NoUserAndGroup
+      }
+
+      log.info(s"Ensime UserGroup = $ensimeUserAndGroup")
       Some(
         context.actorOf(
-          Props(new EnsimeActor(system, sbtRunner)),
+          EnsimeActor.props(system, sbtRunner, ensimeUserAndGroup),
           name = "EnsimeActor"
         )
       )
@@ -33,7 +45,7 @@ class SbtActor(system: ActorSystem,
       None
     }
 
-  def receive = {
+  def receive: Receive = {
     case SbtPing =>
       sender ! SbtPong
 
@@ -44,6 +56,7 @@ class SbtActor(system: ActorSystem,
       formatActor.forward(format)
 
     case task: SbtTask =>
+      log.info(s"Received task ${task.taskId} sending to runner")
       sbtRunner.forward(task)
   }
 }

@@ -1,18 +1,17 @@
-package com.olegych.scastie
-package sbt
+package com.olegych.scastie.sbt
 
-import api.{FormatRequest, FormatResponse, ScalaTargetType}
-
-import akka.actor.Actor
-
-import org.scalafmt.{Scalafmt, Formatted}
+import com.olegych.scastie.api.{FormatRequest, FormatResponse, ScalaTargetType}
+import akka.actor.{Actor, Props}
+import org.scalafmt.{Formatted, Scalafmt}
 import org.scalafmt.config.{ScalafmtConfig, ScalafmtRunner}
-
 import org.slf4j.LoggerFactory
-
 import java.io.{PrintWriter, StringWriter}
 
-class FormatActor() extends Actor {
+object FormatActor {
+  def props = Props(new FormatActor)
+}
+
+class FormatActor private extends Actor {
   private val log = LoggerFactory.getLogger(getClass)
 
   private def format(code: String,
@@ -29,18 +28,16 @@ class FormatActor() extends Actor {
 
     Scalafmt.format(code, style = config) match {
       case Formatted.Success(formattedCode) => Right(formattedCode)
-      case Formatted.Failure(failure) => {
+      case Formatted.Failure(failure) =>
         val errors = new StringWriter()
         failure.printStackTrace(new PrintWriter(errors))
-        val fullStack = errors.toString()
+        val fullStack = errors.toString
         Left(fullStack)
-      }
     }
   }
 
-  def receive = {
-    case FormatRequest(code, worksheetMode, targetType) => {
+  def receive: Receive = {
+    case FormatRequest(code, worksheetMode, targetType) =>
       sender ! FormatResponse(format(code, worksheetMode, targetType))
-    }
   }
 }

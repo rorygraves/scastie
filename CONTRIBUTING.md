@@ -21,6 +21,27 @@ sbt
 
 open http://localhost:9000
 
+## How to run sbtActor under docker locally
+
+* Ensure all code is committed
+```
+sbt sbtRunner/docker
+docker run  -p 5150:5150 scalacenter/scastie-sbt-runner:<hashCreatedInPreviousCommand>
+  
+```
+ in another window start the server:
+```
+sbt
+> ~server/reStart
+```
+
+It should be possible to run a second docker instance on a different port by pickign an new port number and updating the balancer conf file to refer to 5150 and a new port (e.g. 5151) and running the second instance as follows:
+
+```
+docker run -p 5151:5151 -e RUNNER_PORT=5151 scalacenter/scastie-sbt-runner:<hashCreatedInPreviousCommand>
+```
+
+
 ## Scalafmt
 
 Make shure to run `bin/scalafmt` to format your code.

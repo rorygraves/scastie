@@ -9,13 +9,13 @@ import akka.actor.ActorRef
 import akka.util.Timeout
 import akka.http.scaladsl.model.RemoteAddress
 
-import scala.concurrent.{Future, ExecutionContext}
+import scala.concurrent.Future
 
 class AutowireApiImplementation(
     dispatchActor: ActorRef,
     ip: RemoteAddress,
     maybeUser: Option[User]
-)(implicit timeout: Timeout, executionContext: ExecutionContext)
+)(implicit timeout: Timeout)
     extends AutowireApi {
 
   private def wrap(inputs: Inputs): InputsWithIpAndUser =
@@ -64,7 +64,7 @@ class AutowireApiImplementation(
 
   def delete(snippetId: SnippetId): Future[Boolean] = {
     if (snippetId.isOwnedBy(maybeUser)) {
-      (dispatchActor ? DeleteSnippet(snippetId)).mapTo[Unit].map(_ => true)
+      (dispatchActor ? DeleteSnippet(snippetId)).mapTo[Boolean]
     } else {
       Future.successful(false)
     }

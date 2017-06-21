@@ -2,7 +2,6 @@ package com.olegych.scastie.instrumentation
 
 import scala.meta._
 import scala.meta.tokens.Token
-import scala.meta.tokens.Token
 
 import scala.collection.immutable.Seq
 

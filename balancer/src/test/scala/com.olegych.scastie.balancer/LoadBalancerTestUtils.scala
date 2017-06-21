@@ -1,21 +1,20 @@
 package com.olegych.scastie
 package balancer
 
-import api.SnippetId
-
+import api.{SnippetId, TaskId}
+import com.olegych.scastie.balancer.internal.Server
 import utils._
-
-import org.scalatest.{FunSuite, Assertion}
+import org.scalatest.{Assertion, FunSuite}
 
 import scala.collection.immutable.Queue
 
 trait LoadBalancerTestUtils extends FunSuite with TestUtils {
-  type TestLoadBalancer = LoadBalancer[String, String]
+  type TestLoadBalancer = LoadBalancer[String]
 
   private var taskId = 1000
   def add(balancer: TestLoadBalancer, config: String): TestLoadBalancer = {
     val (_, balancer0) =
-      balancer.add(Task(config, nextIp, SnippetId(taskId.toString, None)))
+      balancer.add(Task(TaskId(taskId), None, config, nextIp, SnippetId(taskId.toString, None)))
     taskId += 1
     balancer0
   }
@@ -33,18 +32,19 @@ trait LoadBalancerTestUtils extends FunSuite with TestUtils {
     assert(Multiset(xs) == Multiset(ys))
 
   private var serverId = 0
-  def server(config: String) = {
-    val t = Server("s" + serverId, config)
+
+  def server(config: String): Server[String] = {
+    val t = Server(RunnerId(serverId), config)
     serverId += 1
     t
   }
 
-  def servers(columns: Seq[String]*): Vector[Server[String, String]] = {
+  def servers(columns: Seq[String]*): Vector[Server[String]] = {
     columns.to[Vector].flatten.map(server)
   }
 
   private var currentIp = 0
-  def nextIp = {
+  def nextIp: Ip = {
     val t = Ip("ip" + currentIp)
     currentIp += 1
     t
@@ -52,7 +52,7 @@ trait LoadBalancerTestUtils extends FunSuite with TestUtils {
 
   def history(columns: Seq[String]*): History[String] = {
     val records =
-      columns.to[Vector].flatten.map(config => Record(config, nextIp)).reverse
+      columns.to[Vector].flatten.map(config => Record(TaskId(1),config, nextIp)).reverse
 
     History(Queue(records: _*), size = 20)
   }

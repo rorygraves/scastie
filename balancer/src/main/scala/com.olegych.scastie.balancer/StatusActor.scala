@@ -2,34 +2,31 @@ package com.olegych.scastie
 package balancer
 
 import api._
-
-import akka.actor.{ActorLogging, Actor, ActorRef, Props, ActorSelection}
+import akka.actor.{Actor, ActorLogging, ActorRef, ActorSelection, Props}
 import akka.stream.actor.ActorPublisher
 import akka.stream.scaladsl.Source
 import akka.stream.actor.ActorPublisherMessage.Request
-
 import java.util.concurrent.TimeUnit
 
+import scala.collection.mutable
 import scala.concurrent.duration._
-
-import scala.collection.mutable.{Queue => MQueue, Buffer}
+import scala.collection.mutable.{Queue => MQueue}
 
 case object SubscribeStatus
 case class LoadBalancerUpdate(
-    newBalancer: LoadBalancer[String, ActorSelection]
+    newBalancer: LoadBalancer[String]
 )
-case class LoadBalancerInfo(balancer: LoadBalancer[String, ActorSelection],
-                            originalSender: ActorRef)
+
 case class SetDispatcher(dispatchActor: ActorRef)
 
 class StatusActor extends Actor with ActorLogging {
-  val publishers = Buffer.empty[ActorRef]
+  private val publishers = mutable.Buffer.empty[ActorRef]
 
-  var dispatchActor: Option[ActorRef] = _
+  private var dispatchActor: Option[ActorRef] = _
 
-  def receive = {
-    case SubscribeStatus => {
-      val publisher = context.actorOf(Props(new StatusForwarder()))
+  def receive: Receive = {
+    case SubscribeStatus =>
+      val publisher = context.actorOf(Props(new StatusForwarder))
       publishers += publisher
 
       val source =
@@ -42,46 +39,43 @@ class StatusActor extends Actor with ActorLogging {
 
       sender ! source
 
-      dispatchActor.foreach(_ ! ReceiveStatus(publisher))
-    }
+      dispatchActor.foreach(_ ! RequestStatusFor(publisher))
 
-    case LoadBalancerUpdate(newBalancer) => {
-      publishers.foreach(_ ! convert(newBalancer))
-    }
+    case LoadBalancerUpdate(newBalancer) =>
+      val message = convert(newBalancer)
+      publishers.foreach(_ ! message)
 
-    case LoadBalancerInfo(balancer, originalSender) =>
-      originalSender ! convert(balancer)
+    case RequestStatusForResponse(balancer, originalRequestor) =>
+      originalRequestor ! convert(balancer)
 
     case SetDispatcher(dispatchActorReference) =>
       dispatchActor = Some(dispatchActorReference)
   }
 
   private def convert(
-      newBalancer: LoadBalancer[String, ActorSelection]
+      newBalancer: LoadBalancer[String]
   ): StatusProgress = {
     StatusInfo(
       newBalancer.servers.map(
-        server => Runner(server.mailbox.map(_.snippetId))
+        server => RunnerStatus(server.mailbox.map(task => TaskStatus(task.taskId, task.user, task.snippetId)).toList)
       )
     )
   }
 }
 
-class StatusForwarder() extends Actor with ActorPublisher[StatusProgress] {
-  var buffer = MQueue.empty[StatusProgress]
-  val maxSize = 10
+class StatusForwarder extends Actor with ActorPublisher[StatusProgress] {
+  private var buffer = MQueue.empty[StatusProgress]
+  private val maxSize = 10
 
-  def receive = {
-    case progress: StatusProgress => {
+  def receive: Receive = {
+    case progress: StatusProgress =>
       if (buffer.size >= maxSize) {
         buffer.dequeue()
       }
       buffer.enqueue(progress)
       deliver()
-    }
-    case _: Request => {
+    case _: Request =>
       deliver()
-    }
   }
 
   private def deliver(): Unit = {

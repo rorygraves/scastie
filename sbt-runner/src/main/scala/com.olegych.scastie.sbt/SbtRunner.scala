@@ -2,36 +2,29 @@ package com.olegych.scastie
 package sbt
 
 import instrumentation._
-
 import api._
 import ScalaTargetType._
 
 import scala.meta.parsers.Parsed
+import upickle.default.{Reader, read => uread, write => uwrite}
+import akka.actor.{Actor, ActorRef, Props}
 
-// import akka.util.Timeout
-// import org.ensime.api._
-// import org.ensime.config.EnsimeConfigProtocol
-// import org.ensime.core.{Broadcaster, Project}
-// import org.ensime.util.path._
-
-import upickle.default.{read => uread, write => uwrite, Reader}
-
-import akka.actor.{Actor, ActorRef}
-// import akka.pattern.ask
-
-import scala.concurrent._
 import scala.concurrent.duration._
-import java.util.concurrent.{TimeoutException, Callable, FutureTask, TimeUnit}
+import java.util.concurrent.{Callable, FutureTask, TimeUnit, TimeoutException}
 
 import scala.util.control.NonFatal
-
 import org.slf4j.LoggerFactory
 
-// import java.io.File
-// import java.nio.charset.Charset
+object SbtRunner {
+  def props(runTimeout: FiniteDuration, production: Boolean): Props = {
+    Props(new SbtRunner(runTimeout, production))
+  }
+}
 
-class SbtRunner(runTimeout: FiniteDuration, production: Boolean) extends Actor {
+class SbtRunner private (runTimeout: FiniteDuration, production: Boolean) extends Actor {
   private val defaultConfig = Inputs.default
+
+  implicit val userAndGroup: UserAndGroup = NoUserAndGroup
 
   private var sbt = new Sbt(defaultConfig, "SbtRunner")
   private val log = LoggerFactory.getLogger(getClass)
@@ -45,16 +38,16 @@ class SbtRunner(runTimeout: FiniteDuration, production: Boolean) extends Actor {
       val Right(in) = instrument(defaultConfig)
       sbt.eval("run", in, (line, _, _, _) => log.info(line), reload = false)
       ()
-    }
+    } else
+      log.info("Sbt warmup skipped")
   }
 
   private def instrument(
       inputs: Inputs
   ): Either[InstrumentationFailure, Inputs] = {
     if (inputs.worksheetMode && inputs.target.targetType != ScalaTargetType.Dotty) {
-      instrumentation
-        .Instrument(inputs.code, inputs.target)
-        .map(instrumented => inputs.copy(code = instrumented))
+      val instrumentedE = instrumentation.Instrument(inputs.code, inputs.target)
+      instrumentedE.map(instrumented => inputs.copy(code = instrumented))
     } else Right(inputs)
   }
 
@@ -129,30 +122,28 @@ class SbtRunner(runTimeout: FiniteDuration, production: Boolean) extends Actor {
     }
   }
 
-  def receive = {
-    case MkEnsimeConfigRequest => {
+  def receive: Receive = {
+    case MkEnsimeConfigRequest =>
       log.info("Generating ensime config file")
       sbt.eval("ensimeConfig",
                defaultConfig,
                (_, _, _, _) => (),
                reload = false)
       sender ! MkEnsimeConfigResponse(sbt.sbtDir)
-    }
 
-    case SbtTask(snippetId, inputs, ip, login, progressActor) => {
-      log.info("login: {}, ip: {} run {}", login, ip, inputs)
+    case SbtTask(taskId, snippetId, inputs, ip, login, progressActor) =>
+      log.info(s"Got $taskId - login: {}, ip: {} run {}", login, ip, inputs)
 
       instrument(inputs) match {
-        case Right(inputs0) => {
+        case Right(inputs0) =>
           run(snippetId,
-              inputs0,
-              ip,
-              login,
-              progressActor,
-              sender,
-              forcedProgramMode = false)
-        }
-        case Left(error) => {
+            inputs0,
+            ip,
+            login,
+            progressActor,
+            sender,
+            forcedProgramMode = false)
+        case Left(error) =>
           def signalError(message: String, line: Option[Int]): Unit = {
             val progress =
               SnippetProgress.default
@@ -166,37 +157,35 @@ class SbtRunner(runTimeout: FiniteDuration, production: Boolean) extends Actor {
           }
 
           error match {
-            case HasMainMethod => {
+            case HasMainMethod =>
               run(snippetId,
-                  inputs.copy(worksheetMode = false),
-                  ip,
-                  login,
-                  progressActor,
-                  sender,
-                  forcedProgramMode = true)
-            }
+                inputs.copy(worksheetMode = false),
+                ip,
+                login,
+                progressActor,
+                sender,
+                forcedProgramMode = true)
             case UnsupportedDialect =>
               signalError(
                 "The worksheet mode does not support this Scala target",
                 None
               )
 
-            case ParsingError(Parsed.Error(pos, message, _)) => {
+            case ParsingError(Parsed.Error(pos, message, _)) =>
               val lineOffset = getLineOffset(worksheetMode = true)
 
               signalError(message, Some(pos.start.line + lineOffset))
-            }
 
           }
-        }
       }
-    }
+    case x =>
+      log.warn(s"Unknown message received: IGNORED $x")
   }
 
   private def withTimeout[T](
       timeout: Duration
   )(block: ⇒ T)(onTimeout: => T): T = {
-    val task = new FutureTask(new Callable[T]() { def call = block })
+    val task = new FutureTask(new Callable[T]() { def call: T = block })
     val thread = new Thread(task)
     try {
       thread.start()
@@ -304,10 +293,9 @@ class SbtRunner(runTimeout: FiniteDuration, production: Boolean) extends Actor {
 
       uwrite(sourceMap0)
     } catch {
-      case e: Exception => {
+      case e: Exception =>
         e.printStackTrace()
         sourceMapRaw
-      }
     }
   }
 
@@ -329,7 +317,7 @@ class SbtRunner(runTimeout: FiniteDuration, production: Boolean) extends Actor {
   private def extract[T: Reader](line: String,
                                  report: Boolean = false): Option[T] = {
     try { Some(uread[T](line)) } catch {
-      case NonFatal(e: scala.MatchError) => {
+      case NonFatal(e: scala.MatchError) =>
         if (report) {
           println("---")
           println(line)
@@ -339,7 +327,6 @@ class SbtRunner(runTimeout: FiniteDuration, production: Boolean) extends Actor {
         }
 
         None
-      }
       case NonFatal(_) => None
     }
   }

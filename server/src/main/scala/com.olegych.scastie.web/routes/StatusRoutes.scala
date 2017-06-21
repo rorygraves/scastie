@@ -25,9 +25,6 @@ import upickle.default.{write => uwrite}
 
 import scala.concurrent.Await
 import scala.concurrent.duration.DurationInt
-import scala.concurrent.duration._
-
-import scala.collection.immutable.Queue
 
 class StatusRoutes(statusActor: ActorRef, userDirectives: UserDirectives) {
 
@@ -35,7 +32,7 @@ class StatusRoutes(statusActor: ActorRef, userDirectives: UserDirectives) {
 
   val adminUser: Directive1[Boolean] =
     userDirectives.optionalLogin.map(
-      user => user.map(_.isAdmin).getOrElse(false)
+      user => user.exists(_.isAdmin)
     )
 
   def hideTask(isAdmin: Boolean, progress: StatusProgress): StatusProgress =
@@ -44,7 +41,7 @@ class StatusRoutes(statusActor: ActorRef, userDirectives: UserDirectives) {
       progress match {
         case StatusInfo(runners) =>
           // Hide the task Queue for non admin users, they will only see the runner count
-          StatusInfo(runners.map(_.copy(tasks = Queue())))
+          StatusInfo(runners.map(_.copy(tasks = List.empty)))
 
         case _ =>
           progress

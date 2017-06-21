@@ -1,35 +1,45 @@
-package com.olegych.scastie
-package sbt
+package com.olegych.scastie.sbt
 
-import api._
+import com.olegych.scastie.api._
 
 import scala.util.Random
 import System.{lineSeparator => nl}
 
 import org.slf4j.LoggerFactory
-import java.nio.file._
 import java.io.{BufferedReader, IOException, InputStreamReader}
 import java.nio.charset.StandardCharsets
+import java.nio.file.Path
 
-class Sbt(defaultConfig: Inputs, name: String) {
+import com.olegych.scastie.{FileUtil, NoUserAndGroup, SomeUserAndGroup, UserAndGroup}
 
-  private val log =
-    LoggerFactory.getLogger(getClass.toString + "(" + name + ")")
+class Sbt(defaultConfig: Inputs, name: String)
+         (implicit val userAndGroup: UserAndGroup)
+{
+  val sbtDir: Path = FileUtil.createTempDir("scastie")
+
+  FileUtil.setFileOwnership(sbtDir, userAndGroup)
+
+  private val log = LoggerFactory.getLogger(getClass.toString + "(" + name + ")")
   private val sbtLog = LoggerFactory.getLogger(s"SbtOutputIO($name)")
+
+  log.info("Starting")
+  log.info(s"sbtDir set to $sbtDir")
 
   private val uniqueId = Random.alphanumeric.take(10).mkString
 
   private var currentSbtConfig = ""
   private var currentSbtPluginsConfig = ""
 
-  val sbtDir = Files.createTempDirectory("scastie")
   private val buildFile = sbtDir.resolve("build.sbt")
   private val prompt = s"""shellPrompt := (_ => "$uniqueId\\n")"""
 
   private val projectDir = sbtDir.resolve("project")
-  Files.createDirectories(projectDir)
+  FileUtil.createDirectories(projectDir)
 
-  write(projectDir.resolve("build.properties"), s"sbt.version = 0.13.15")
+  val startScript: Path = sbtDir.resolve("startSbt.sh")
+  FileUtil.write(startScript,s"cd ${sbtDir.toAbsolutePath}\nexport CI=true\nsbt")
+  FileUtil.makeExecutable(startScript)
+  FileUtil.write(projectDir.resolve("build.properties"), s"sbt.version = 0.13.15")
 
   private val pluginFile = projectDir.resolve("plugins.sbt")
 
@@ -45,25 +55,33 @@ class Sbt(defaultConfig: Inputs, name: String) {
     setPlugins(defaultConfig)
   }
 
+  log.info("Running setup")
   setup()
+  log.info("Setup complete")
 
-  val codeFile = sbtDir.resolve("src/main/scala/main.scala")
-  Files.createDirectories(codeFile.getParent)
+  val codeFile: Path = sbtDir.resolve("src/main/scala/main.scala")
+  FileUtil.createDirectories(codeFile.getParent)
 
   def scalaJsContent(): Option[String] = {
-    slurp(sbtDir.resolve(ScalaTarget.Js.targetFilename))
+    FileUtil.slurp(sbtDir.resolve(ScalaTarget.Js.targetFilename))
   }
 
   def scalaJsSourceMapContent(): Option[String] = {
-    slurp(sbtDir.resolve(ScalaTarget.Js.sourceMapFilename))
+    FileUtil.slurp(sbtDir.resolve(ScalaTarget.Js.sourceMapFilename))
   }
 
-  private val (process, fin, fout) = {
-    log.info("Starting sbt process")
-    val builder = new ProcessBuilder("sbt").directory(sbtDir.toFile)
-    builder
-      .environment()
-      .put(
+  private val (process, fin, ferr, fout) = {
+    val command = userAndGroup match {
+      case SomeUserAndGroup(userName, _) =>
+        List("sudo", "-i", "-u", userName, "--", s"${sbtDir.toFile}/startSbt.sh")
+      case NoUserAndGroup =>
+        List("sbt")
+    }
+
+    log.info(s"Starting sbt process: ${command.mkString(" ")} in ${sbtDir.toFile}")
+    val builder = new ProcessBuilder(command: _*).directory(sbtDir.toFile)
+    val buildEnv = builder.environment()
+    buildEnv.put(
         "SBT_OPTS",
         Seq(
           "-Xms512m",
@@ -72,6 +90,9 @@ class Sbt(defaultConfig: Inputs, name: String) {
           "-Dsbt.log.noformat=true"
         ).mkString(" ")
       )
+    buildEnv.put("CI", "true")
+    buildEnv.put("COURSIER_PROGRESS", "false")
+
 
     val process = builder.start()
 
@@ -79,49 +100,77 @@ class Sbt(defaultConfig: Inputs, name: String) {
       new InputStreamReader(process.getInputStream, StandardCharsets.UTF_8)
     )
 
-    (process, process.getOutputStream, in)
+    val err = new BufferedReader(
+      new InputStreamReader(process.getErrorStream, StandardCharsets.UTF_8)
+    )
+
+    log.info("sbt process running")
+    (process, process.getOutputStream, err, in)
   }
 
   private def collect(
-      lineCallback: (String, Boolean, Boolean, Boolean) => Unit,
-      reload: Boolean
-  ): Boolean = {
-    val chars = new collection.mutable.Queue[Character]()
+                       lineCallback: (String, Boolean, Boolean, Boolean) => Unit,
+                       reload: Boolean
+                     ): Boolean = {
+    val inChars = new collection.mutable.Queue[Character]()
+    val errorChars = new collection.mutable.Queue[Character]()
     var read = 0
     var done = false
     var sbtError = false
+    log.info("Running collect")
+    while(!done) {
+      val foutReady = fout.ready()
+      val ferrReady = ferr.ready()
+      if(!foutReady && ! ferrReady)
+        Thread.sleep(10) // to stop thrashing
 
-    while (read != -1 && !done) {
+      if(foutReady) {
+        read = fout.read()
+        if (read == 10) {
+          val line = inChars.mkString
 
-      read = fout.read()
-      if (read == 10) {
-        val line = chars.mkString
+          val prompt = line == uniqueId
+          sbtError = line == "[error] Type error in expression"
+          done = prompt || sbtError
 
-        val prompt = line == uniqueId
-        sbtError = line == "[error] Type error in expression"
-        done = prompt || sbtError
+          sbtLog.info(s"OUT: $line")
 
-        sbtLog.info(line)
+          lineCallback(line, done, sbtError, reload)
+          inChars.clear()
+        } else {
+          inChars += read.toChar
+        }
+      }
+      if(ferrReady && !done) {
+        read = ferr.read()
+        if (read == 10) {
+          val line = errorChars.mkString
 
-        lineCallback(line, done, sbtError, reload)
-        chars.clear()
-      } else {
-        chars += read.toChar
+          sbtLog.info(s"ERR: $line")
+
+//          lineCallback(line, done, sbtError, reload)
+          errorChars.clear()
+        } else {
+          errorChars += read.toChar
+        }
       }
     }
     if (sbtError) {
+      log.info("Saw sbt error retriggering setup")
       setup()
+      // wait for initialise to be complete
       process("r", noop, reload = false)
+      log.info("reset complete")
     }
 
     sbtError
   }
 
   type LineCallback = (String, Boolean, Boolean, Boolean) => Unit
-  val noop: LineCallback =
-    (_, _, _, _) => ()
+  val noop: LineCallback = (_, _, _, _) => ()
 
   collect(noop, reload = false)
+  log.info("sbt initialised")
 
   private def process(command: String,
                       lineCallback: LineCallback,
@@ -150,11 +199,10 @@ class Sbt(defaultConfig: Inputs, name: String) {
   }
 
   private def writeFile(path: Path, content: String): Unit = {
-    if (Files.exists(path)) {
-      Files.delete(path)
-    }
+    if (FileUtil.exists(path))
+      FileUtil.delete(path)
 
-    Files.write(path, content.getBytes, StandardOpenOption.CREATE_NEW)
+    FileUtil.write(path, content)
 
     ()
   }
@@ -166,7 +214,7 @@ class Sbt(defaultConfig: Inputs, name: String) {
 
   private def setConfig(inputs: Inputs): Unit = {
     writeFile(buildFile,
-              prompt + nl + inputs.sbtConfig + nl + secretSbtConfigExtra)
+      prompt + nl + inputs.sbtConfig + nl + secretSbtConfigExtra)
     currentSbtConfig = inputs.sbtConfig
   }
 
@@ -175,10 +223,10 @@ class Sbt(defaultConfig: Inputs, name: String) {
            lineCallback: LineCallback,
            reload: Boolean): Boolean = {
     maybeReloadAndEval(command = command,
-                       commandIfNeedsReload = "",
-                       inputs,
-                       lineCallback,
-                       reload)
+      commandIfNeedsReload = "",
+      inputs,
+      lineCallback,
+      reload)
   }
 
   def evalIfNeedsReload(command: String,
@@ -186,10 +234,10 @@ class Sbt(defaultConfig: Inputs, name: String) {
                         lineCallback: LineCallback,
                         reload: Boolean): Boolean = {
     maybeReloadAndEval(command = "",
-                       commandIfNeedsReload = command,
-                       inputs,
-                       lineCallback,
-                       reload)
+      commandIfNeedsReload = command,
+      inputs,
+      lineCallback,
+      reload)
   }
 
   private def maybeReloadAndEval(command: String,
@@ -199,7 +247,7 @@ class Sbt(defaultConfig: Inputs, name: String) {
                                  reload: Boolean) = {
 
     val isReloading = needsReload(inputs)
-
+    log.info(s"maybeReloadAndEval isReloading: $isReloading")
     if (inputs.sbtConfig != currentSbtConfig) {
       setConfig(inputs)
     }
@@ -214,19 +262,27 @@ class Sbt(defaultConfig: Inputs, name: String) {
       } else false
 
     if (!reloadError) {
-      write(codeFile, inputs.code, truncate = true)
+      FileUtil.write(codeFile, inputs.code, truncate = true)
       try {
         if (isReloading && !commandIfNeedsReload.isEmpty)
           process(commandIfNeedsReload, lineCallback, reload)
-        if (!command.isEmpty) process(command, lineCallback, reload)
+        if (!command.isEmpty) {
+          log.info(s"Running command: $command -----------------------------------")
+          val res = process(command, lineCallback, reload)
+          println(" RES = " + res + "---------------------------------------------")
+          res
+        }
       } catch {
-        case e: IOException => {
+        case e: IOException =>
+          log.error("Got IOException: ",e)
           // when the snippet is pkilled (timeout) the sbt output stream is closed
           if (e.getMessage == "Stream closed") ()
           else throw e
-        }
+        case ex: Throwable =>
+          log.error("Got exception: ",ex)
       }
-    }
+    } else
+      log.info("reload failed")
 
     reloadError
   }

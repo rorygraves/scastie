@@ -34,10 +34,11 @@ class OldScastieConverterTest extends FunSuite {
         worksheetMode = false
       )
 
-    assert(obtained == expected)
+    assert(obtained === expected)
   }
 
   test("convert") {
+    import FileUtil.slurp
     val path = Paths.get("balancer", "src", "test", "resources")
     val original = slurp(path.resolve("convert-test.scala")).get
 

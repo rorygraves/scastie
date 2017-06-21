@@ -1,10 +1,11 @@
 package com.olegych.scastie
 package api
 
-import scala.collection.immutable.Queue
-
 sealed trait StatusProgress
 case object StatusKeepAlive extends StatusProgress
-case class StatusInfo(runners: Vector[Runner]) extends StatusProgress
+case class StatusInfo(runners: Vector[RunnerStatus]) extends StatusProgress
 
-case class Runner(tasks: Queue[SnippetId])
+case class RunnerStatus(tasks: List[TaskStatus])
+
+
+case class TaskStatus(taskId: TaskId, user: Option[String], snippetId: SnippetId)

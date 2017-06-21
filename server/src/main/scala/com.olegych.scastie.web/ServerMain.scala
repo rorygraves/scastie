@@ -6,8 +6,6 @@ import oauth2._
 import balancer._
 
 import akka.http.scaladsl._
-import server._
-import Directives._
 
 import server.Directives._
 
@@ -34,7 +32,7 @@ object ServerMain {
     val production = config.getBoolean("production")
 
     if (production) {
-      writeRunningPid()
+      FileUtil.writeRunningPid()
     }
 
     implicit val system = ActorSystem("scastie")

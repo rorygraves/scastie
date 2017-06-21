@@ -3,7 +3,7 @@ package com.olegych.scastie.sbt
 import com.olegych.scastie.api._
 import akka.{Done, NotUsed}
 import akka.util.Timeout
-import akka.actor.{Actor, ActorRef, ActorSystem, Cancellable}
+import akka.actor.{Actor, ActorRef, ActorSystem, Cancellable, Props}
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.model.StatusCodes
 import akka.http.scaladsl.model.ws.{Message, TextMessage, WebSocketRequest}
@@ -12,11 +12,12 @@ import akka.stream.scaladsl.{Flow, Keep, Sink, Source}
 import org.ensime.jerky.JerkyFormats
 import org.ensime.api._
 import JerkyFormats._
+import com.olegych.scastie.{FileUtil, NoUserAndGroup, SomeUserAndGroup, UserAndGroup}
 
 import scala.io.Source.fromFile
 import org.slf4j.LoggerFactory
 import java.io._
-import java.nio.file.{Files, Path}
+import java.nio.file.Path
 
 import scala.concurrent.duration._
 import scala.concurrent.Future
@@ -27,11 +28,18 @@ case object Heartbeat
 case object MkEnsimeConfigRequest
 case class MkEnsimeConfigResponse(sbtDir: Path)
 
-class EnsimeActor(system: ActorSystem, sbtRunner: ActorRef) extends Actor {
+object EnsimeActor {
+  def props(system: ActorSystem,
+            sbtRunner: ActorRef,
+            userAndGroup: UserAndGroup): Props = Props(new EnsimeActor(system, sbtRunner, userAndGroup))
+}
+
+class EnsimeActor private (system: ActorSystem, sbtRunner: ActorRef, implicit val userAndGroup: UserAndGroup) extends Actor {
   import spray.json._
   import system.dispatcher
 
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = LoggerFactory.getLogger("EnsimeActor")
+  private val ensimeLog = LoggerFactory.getLogger("EnsimeOutput")
 
   implicit val materializer_ = ActorMaterializer()
   implicit val timeout = Timeout(5.seconds)
@@ -45,7 +53,7 @@ class EnsimeActor(system: ActorSystem, sbtRunner: ActorRef) extends Actor {
 
   private var codeFile: Option[Path] = None
 
-  def handleRPCResponse(id: Int, payload: EnsimeServerMessage) = {
+  def handleRPCResponse(id: Int, payload: EnsimeServerMessage): Unit = {
     requests.get(id) match {
       case Some(ref) =>
         requests -= id
@@ -87,6 +95,7 @@ class EnsimeActor(system: ActorSystem, sbtRunner: ActorRef) extends Actor {
     val env = RpcRequestEnvelope(rpcRequest, nextId)
     nextId += 1
 
+    log.info(s"Sending request to Ensime instance with id $nextId")
     log.debug(s"Sending $env")
     val json = env.toJson.prettyPrint
     ensimeWS match {
@@ -106,7 +115,9 @@ class EnsimeActor(system: ActorSystem, sbtRunner: ActorRef) extends Actor {
         .actorRef[TextMessage.Strict](bufferSize = 10, OverflowStrategy.fail)
 
     def handleIncomingMessage(message: String) = {
+      log.info("Received message " + message)
       val env = message.parseJson.convertTo[RpcResponseEnvelope]
+      log.info(s"Got ensime RPC response with $env")
       env.callId match {
         case Some(id) => handleRPCResponse(id, env.payload)
         case None     => ()
@@ -116,16 +127,14 @@ class EnsimeActor(system: ActorSystem, sbtRunner: ActorRef) extends Actor {
     val messageSink: Sink[Message, NotUsed] =
       Flow[Message]
         .map {
-          case msg: TextMessage.Strict => {
+          case msg: TextMessage.Strict =>
             handleIncomingMessage(msg.text)
-          }
-          case msgStream: TextMessage.Streamed => {
+          case msgStream: TextMessage.Streamed =>
             msgStream.textStream.runFold("")(_ + _).onComplete {
               case Success(msg) => handleIncomingMessage(msg)
               case Failure(e) =>
                 log.info(s"Couldn't process incoming text stream. $e")
             }
-          }
           case _ =>
             log.info(
               "Got unsupported ws response message type from ensime-server"
@@ -158,7 +167,7 @@ class EnsimeActor(system: ActorSystem, sbtRunner: ActorRef) extends Actor {
     )
   }
 
-  override def preStart() = {
+  override def preStart(): Unit = {
     log.info("Request ensime info from sbtRunner")
     sbtRunner.tell(MkEnsimeConfigRequest, self)
   }
@@ -166,7 +175,7 @@ class EnsimeActor(system: ActorSystem, sbtRunner: ActorRef) extends Actor {
   private def startEnsimeServer(sbtDir: Path) = {
     val ensimeConfigFile = sbtDir.resolve(".ensime")
     val ensimeCacheDir = sbtDir.resolve(".ensime_cache")
-    Files.createDirectories(ensimeCacheDir)
+    FileUtil.createDirectories(ensimeCacheDir)
 
     val httpPortFile = ensimeCacheDir.resolve("http")
 
@@ -175,10 +184,9 @@ class EnsimeActor(system: ActorSystem, sbtRunner: ActorRef) extends Actor {
 
     def parseEnsimeConfFor(field: String): String = {
       s":$field \\(.*?\\)".r findFirstIn ensimeConf match {
-        case Some(x) => {
+        case Some(x) =>
           // we need to take everything inside ("...") & replace " " with : to form a classpath string
           x.substring(x.indexOf("(") + 2, x.length - 2).replace("\" \"", ":")
-        }
         case None => throw new Exception("Can't parse ensime config!")
       }
     }
@@ -186,17 +194,26 @@ class EnsimeActor(system: ActorSystem, sbtRunner: ActorRef) extends Actor {
       parseEnsimeConfFor("scala-compiler-jars") +
       parseEnsimeConfFor("compile-deps")
 
-    log.info("Starting Ensime server")
-    ensimeProcess = Some(
-      new ProcessBuilder(
-        "java",
+      log.info("Starting Ensime server")
+      val commandLine: List[String] = (userAndGroup match {
+        case SomeUserAndGroup(username, _) =>
+          List("sudo", "-i", "-u", username)
+        case NoUserAndGroup =>
+          List.empty[String]
+
+      }) ::: List("java",
         "-Densime.config=" + ensimeConfigFile,
         "-classpath",
         classpath,
         "-Densime.explode.on.disconnect=true",
-        "org.ensime.server.Server"
-      ).directory(sbtDir.toFile).start()
-    )
+        "org.ensime.server.Server")
+
+      log.info(s"Starting Ensime server - cmdline = $commandLine in $sbtDir")
+      ensimeProcess = Some(new ProcessBuilder(
+          commandLine :_ *
+        ).directory(sbtDir.toFile).start()
+      )
+
 
     val stdout = ensimeProcess.get.getInputStream
     streamLogger(stdout)
@@ -238,14 +255,14 @@ class EnsimeActor(system: ActorSystem, sbtRunner: ActorRef) extends Actor {
       val is = new BufferedReader(new InputStreamReader(inputStream))
       var line = is.readLine()
       while (line != null) {
-        log.info(s"$line")
+        ensimeLog.info(s"$line")
         line = is.readLine()
       }
     }
     ()
   }
 
-  def receive = {
+  def receive: Receive = {
     case MkEnsimeConfigResponse(sbtDir: Path) =>
       log.info("Got MkEnsimeConfigResponse")
       try {
@@ -295,8 +312,8 @@ class EnsimeActor(system: ActorSystem, sbtRunner: ActorRef) extends Actor {
     case Heartbeat =>
       sendToEnsime(ConnectionInfoReq, self)
 
-    case x =>
-      log.debug(s"Got $x at EnsimeActor")
+    case other =>
+      log.debug(s"Got $other at EnsimeActor")
   }
 
   private def processRequest(

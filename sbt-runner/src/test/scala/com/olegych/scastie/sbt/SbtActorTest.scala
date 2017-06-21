@@ -1,12 +1,10 @@
-package com.olegych.scastie
-
-package sbt
-
-import api._
+package com.olegych.scastie.sbt
 
 import akka.actor.ActorSystem
-import akka.testkit.{TestKit, ImplicitSender, TestProbe, TestActorRef}
-import org.scalatest.{FunSuiteLike, BeforeAndAfterAll}
+import akka.testkit.{ImplicitSender, TestActorRef, TestKit, TestProbe}
+import com.olegych.scastie.SbtTask
+import com.olegych.scastie.api._
+import org.scalatest.{BeforeAndAfterAll, FunSuiteLike}
 
 import scala.concurrent.duration._
 
@@ -152,16 +150,20 @@ class SbtActorTest()
     currentId += 1
     SnippetId(t.toString, None)
   }
+
+  val taskId = TaskId(1)
   private var firstRun = true
   private def run(inputs: Inputs)(fish: SnippetProgress => Boolean): Unit = {
     val ip = "my-ip"
     val progressActor = TestProbe()
 
-    sbtActor ! SbtTask(snippetId, inputs, ip, None, progressActor.ref)
+    sbtActor ! SbtTask(taskId, snippetId, inputs, ip, None, progressActor.ref)
 
     val totalTimeout =
-      if (firstRun) timeout + 20.second
-      else timeout
+      if (firstRun)
+        timeout + 20.second
+      else
+        timeout
 
     progressActor.fishForMessage(totalTimeout + 5.seconds) {
       case progress: SnippetProgress => {

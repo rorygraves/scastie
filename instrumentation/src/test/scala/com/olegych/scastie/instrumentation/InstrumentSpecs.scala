@@ -1,13 +1,12 @@
-package com.olegych.scastie
-package instrumentation
-
-import api.ScalaTarget
+package com.olegych.scastie.instrumentation
 
 import java.nio.file._
 
-import scala.collection.JavaConverters._
-
+import com.olegych.scastie.FileUtil._
+import com.olegych.scastie.api.ScalaTarget
 import org.scalatest.FunSuite
+
+import scala.collection.JavaConverters._
 
 class InstrumentSpecs extends FunSuite {
 

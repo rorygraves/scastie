@@ -1,25 +1,18 @@
 package com.olegych.scastie
 package balancer
 
-import api._
-import akka.actor.{Actor, ActorLogging, ActorRef, ActorSelection}
-import akka.remote.DisassociatedEvent
-import akka.pattern.ask
-import akka.util.Timeout
-
-import com.typesafe.config.ConfigFactory
 import java.nio.file._
 
-import scala.concurrent._
-import scala.concurrent.duration._
-
-import java.util.concurrent.TimeoutException
+import akka.actor.{Actor, ActorLogging, ActorRef}
+import com.olegych.scastie.api._
+import com.olegych.scastie.balancer.internal.Server
+import com.typesafe.config.ConfigFactory
 
 import scala.collection.immutable.Queue
 
-case class Address(host: String, port: Int)
-case class SbtConfig(config: String)
-
+case class RunnerId(id: Int)
+case class ProxyConnected(runnerId: RunnerId)
+case class ProxyDisconnected(runnerId: RunnerId)
 case class InputsWithIpAndUser(inputs: Inputs, ip: String, user: Option[User])
 
 case class RunSnippet(inputs: InputsWithIpAndUser)
@@ -35,7 +28,20 @@ case class FetchSnippet(snippetId: SnippetId)
 case class FetchOldSnippet(id: Int)
 case class FetchUserSnippets(user: User)
 
-case class ReceiveStatus(originalSender: ActorRef)
+/** Request to send the current status to the sender with the attached target information.
+  * N.b. the 'target' is not used by the DispatchActor and only used by the sender.
+  *
+  * @param target Information for the sender about for this request
+  */
+case class RequestStatusFor(target: ActorRef)
+
+/**
+  * Response message for RequestStatusFor returning the current balancer information.
+  * @param balancer The balancer infomation.
+  * @param target Target (provided by RequestStatusFor
+  */
+case class RequestStatusForResponse(balancer: LoadBalancer[String], target: ActorRef)
+
 
 class DispatchActor(progressActor: ActorRef, statusActor: ActorRef)
     extends Actor
@@ -49,45 +55,24 @@ class DispatchActor(progressActor: ActorRef, statusActor: ActorRef)
 
   private val ports = (0 until portsSize).map(portsStart + _)
 
-  private var remoteSelections = ports.map { port =>
-    val selection = context.actorSelection(
-      s"akka.tcp://SbtRemote@$host:$port/user/SbtActor"
-    )
-    (host, port) -> selection
+
+  val runnerProxies: Map[RunnerId, ActorRef] = ports.zipWithIndex.map { case (port,idx) =>
+    val id = idx + 1
+    val runnerId = RunnerId(id)
+    val ref = context.actorOf(SbtRunnerProxy.props(runnerId, host, port), s"SbtRunnerProxy_$id")
+    runnerId -> ref
   }.toMap
 
-  private var loadBalancer: LoadBalancer[String, ActorSelection] = {
-    val servers = remoteSelections.to[Vector].map {
-      case (_, ref) =>
-        Server(ref, Inputs.default.sbtConfig)
-    }
-
+  private var loadBalancer: LoadBalancer[String] = {
     val history = History(Queue.empty[Record[String]], size = 100)
-    LoadBalancer(servers, history)
+    LoadBalancer(Vector.empty, history)
   }
+
+  def refToProxy(runnerId: RunnerId): ActorRef = {
+    runnerProxies(runnerId)
+  }
+
   updateBalancer(loadBalancer)
-
-  import context._
-
-  system.scheduler.schedule(0.seconds, 1.seconds) {
-
-    implicit val timeout = Timeout(1.seconds)
-    try {
-      val res = Future.sequence(loadBalancer.servers.map(_.ref ? SbtPing))
-      Await.result(res, 1.seconds)
-      ()
-    } catch {
-      case e: TimeoutException => {
-        // TODO: this is sending to much events to Sentry
-        log.error(e, "failed to receive pong")
-      }
-    }
-  }
-
-  override def preStart = {
-    context.system.eventStream.subscribe(self, classOf[DisassociatedEvent])
-    ()
-  }
 
   private val container = new SnippetsContainer(
     Paths.get(configuration.getString("snippets-dir")),
@@ -98,9 +83,9 @@ class DispatchActor(progressActor: ActorRef, statusActor: ActorRef)
   log.info(s"connecting to: $host $portsInfo")
 
   private def updateBalancer(
-      newBalancer: LoadBalancer[String, ActorSelection]
+      newBalancer: LoadBalancer[String]
   ): Unit = {
-    println("updateBalancer")
+    log.info("updateBalancer")
     loadBalancer = newBalancer
     statusActor ! LoadBalancerUpdate(newBalancer)
     ()
@@ -110,54 +95,53 @@ class DispatchActor(progressActor: ActorRef, statusActor: ActorRef)
                   snippetId: SnippetId): Unit = {
     val InputsWithIpAndUser(inputs, ip, user) = inputsWithIpAndUser
 
-    log.info("id: {}, ip: {} run {}", snippetId, ip, inputs)
+    val userNameOpt = user.map(_.login)
+    val taskId = Task.nextId
+    val task = Task(taskId, userNameOpt, inputs.sbtConfig, Ip(ip), snippetId)
+    log.info("run: taskId: {}, id: {}, ip: {} run {}", taskId.id, snippetId, ip, inputs)
 
-    val (server, newBalancer) =
-      loadBalancer.add(Task(inputs.sbtConfig, Ip(ip), snippetId))
+    val (server: Server[String], newBalancer) =
+      loadBalancer.add(task)
 
     updateBalancer(newBalancer)
 
-    server.ref.tell(
-      SbtTask(snippetId, inputs, ip, user.map(_.login), progressActor),
+    log.info(s"Sending $taskId to ${server.id}")
+    refToProxy(server.id).tell(
+      SbtTask(taskId, snippetId, inputs, ip, userNameOpt, progressActor),
       self
     )
   }
 
-  def receive = {
-    case format: FormatRequest => {
+  def receive: Receive = {
+    case format: FormatRequest =>
       val server = loadBalancer.getRandomServer
-      server.ref.tell(format, sender)
+      refToProxy(server.id).forward(format)
       ()
-    }
 
-    case req: EnsimeRequest => {
-      loadBalancer.getRandomServer.ref.tell(req, sender)
-    }
+    case req: EnsimeRequest =>
+      refToProxy(loadBalancer.getRandomServer.id).forward(req)
 
-    case RunSnippet(inputsWithIpAndUser) => {
+    case RunSnippet(inputsWithIpAndUser) =>
       val InputsWithIpAndUser(inputs, _, user) = inputsWithIpAndUser
       val snippetId =
         container.create(inputs, user.map(u => UserLogin(u.login)))
       run(inputsWithIpAndUser, snippetId)
       sender ! snippetId
-    }
 
-    case SaveSnippet(inputsWithIpAndUser) => {
+    case SaveSnippet(inputsWithIpAndUser) =>
       val InputsWithIpAndUser(inputs, _, user) = inputsWithIpAndUser
       val snippetId = container.save(inputs, user.map(u => UserLogin(u.login)))
       run(inputsWithIpAndUser, snippetId)
       sender ! snippetId
-    }
 
-    case AmendSnippet(snippetId, inputsWithIpAndUser) => {
+    case AmendSnippet(snippetId, inputsWithIpAndUser) =>
       val amendSuccess = container.amend(snippetId, inputsWithIpAndUser.inputs)
       if (amendSuccess) {
         run(inputsWithIpAndUser, snippetId)
       }
       sender ! amendSuccess
-    }
 
-    case UpdateSnippet(snippetId, inputsWithIpAndUser) => {
+    case UpdateSnippet(snippetId, inputsWithIpAndUser) =>
       val updatedSnippetId =
         container.update(snippetId, inputsWithIpAndUser.inputs)
 
@@ -166,78 +150,58 @@ class DispatchActor(progressActor: ActorRef, statusActor: ActorRef)
       )
 
       sender ! updatedSnippetId
-    }
 
-    case ForkSnippet(snippetId, inputsWithIpAndUser) => {
+    case ForkSnippet(snippetId, inputsWithIpAndUser) =>
       val InputsWithIpAndUser(inputs, _, user) = inputsWithIpAndUser
 
       container
         .fork(snippetId, inputs, user.map(u => UserLogin(u.login))) match {
-        case Some(forkedSnippetId) => {
+        case Some(forkedSnippetId) =>
           sender ! Some(forkedSnippetId)
           run(inputsWithIpAndUser, forkedSnippetId)
-        }
-        case None => sender ! None
+        case None =>
+          sender ! None
       }
-    }
 
-    case DeleteSnippet(snippetId) => {
+    case DeleteSnippet(snippetId) =>
       container.delete(snippetId)
-      sender ! (())
-    }
+      sender ! true
 
-    case DownloadSnippet(snippetId) => {
+    case DownloadSnippet(snippetId) =>
       sender ! container.downloadSnippet(snippetId)
-    }
 
-    case FetchSnippet(snippetId) => {
+    case FetchSnippet(snippetId) =>
       sender ! container.readSnippet(snippetId)
-    }
 
-    case FetchOldSnippet(id) => {
+    case FetchOldSnippet(id) =>
       sender ! container.readOldSnippet(id)
-    }
 
-    case FetchUserSnippets(user) => {
+    case FetchUserSnippets(user) =>
       sender ! container.listSnippets(UserLogin(user.login))
-    }
 
-    case FetchScalaJs(snippetId) => {
+    case FetchScalaJs(snippetId) =>
       sender ! container.readScalaJs(snippetId)
-    }
 
-    case FetchScalaSource(snippetId) => {
+    case FetchScalaSource(snippetId) =>
       sender ! container.readScalaSource(snippetId)
-    }
 
-    case FetchScalaJsSourceMap(snippetId) => {
+    case FetchScalaJsSourceMap(snippetId) =>
       sender ! container.readScalaJsSourceMap(snippetId)
-    }
 
-    case progress: api.SnippetProgress => {
+    case progress: api.SnippetProgress =>
       if (progress.done) {
         progress.snippetId.foreach(
           sid => updateBalancer(loadBalancer.done(sid))
         )
       }
       container.appendOutput(progress)
-    }
 
-    case event: DisassociatedEvent => {
-      for {
-        host <- event.remoteAddress.host
-        port <- event.remoteAddress.port
-        ref <- remoteSelections.get((host, port))
-      } {
-        log.warning(event.toString)
-        log.warning("removing disconnected: " + ref)
-        remoteSelections = remoteSelections - ((host, port))
-        updateBalancer(loadBalancer.removeServer(ref))
-      }
-    }
-
-    case ReceiveStatus(originalSender) =>
+    case ProxyConnected(id) =>
+      updateBalancer(loadBalancer.addServer(id, Inputs.default.sbtConfig))
+    case ProxyDisconnected(id) =>
+      updateBalancer(loadBalancer.removeServer(id))
+    case RequestStatusFor(target) =>
       println(s" status Actor asks for status info")
-      sender ! LoadBalancerInfo(loadBalancer, originalSender)
+      sender ! RequestStatusForResponse(loadBalancer, target)
   }
 }

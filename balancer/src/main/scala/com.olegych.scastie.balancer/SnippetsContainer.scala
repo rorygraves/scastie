@@ -1,7 +1,7 @@
-package com.olegych.scastie
-package balancer
+package com.olegych.scastie.balancer
 
-import api._
+import com.olegych.scastie._
+import com.olegych.scastie.api._
 import upickle.default.{read => uread, write => uwrite}
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -9,6 +9,7 @@ import java.nio.file._
 import FileVisitResult.CONTINUE
 import java.util.{Base64, UUID}
 import System.{lineSeparator => nl}
+import com.olegych.scastie.FileUtil._
 
 import net.lingala.zip4j.core.ZipFile
 import net.lingala.zip4j.model.ZipParameters
@@ -16,9 +17,10 @@ import net.lingala.zip4j.model.ZipParameters
 case class UserLogin(login: String)
 
 class SnippetsContainer(root: Path, oldRoot: Path) {
+  implicit val userAndGroup: UserAndGroup = NoUserAndGroup
 
   def create(inputs: Inputs, user: Option[UserLogin]): SnippetId = {
-    val uuid = randomUrlFriendlyBase64UUID
+    val uuid = randomUrlFriendlyBase64UUID()
     val snippetId =
       SnippetId(uuid, user.map(u => SnippetUserPart(u.login, None)))
     write(inputsFile(snippetId), uwrite(inputs))
@@ -42,7 +44,7 @@ class SnippetsContainer(root: Path, oldRoot: Path) {
 
   def update(snippetId: SnippetId, inputs: Inputs): Option[SnippetId] = {
     snippetId.user match {
-      case Some(SnippetUserPart(login, _)) => {
+      case Some(SnippetUserPart(login, _)) =>
         val nextSnippetId =
           SnippetId(
             snippetId.base64UUID,
@@ -56,7 +58,6 @@ class SnippetsContainer(root: Path, oldRoot: Path) {
         write(inputsFile(nextSnippetId),
               uwrite(inputs.copy(showInUserProfile = true)))
         Some(nextSnippetId)
-      }
       case None => None
     }
   }
@@ -89,10 +90,9 @@ class SnippetsContainer(root: Path, oldRoot: Path) {
     (progress.scalaJsContent,
      progress.scalaJsSourceMapContent,
      progress.snippetId) match {
-      case (Some(scalaJsContent), Some(scalaJsSourceMapContent), Some(sid)) => {
+      case (Some(scalaJsContent), Some(scalaJsSourceMapContent), Some(sid)) =>
         write(scalaJsFile(sid), scalaJsContent)
         write(scalaJsSourceMapFile(sid), scalaJsSourceMapContent)
-      }
       case _ => ()
     }
 
@@ -230,7 +230,7 @@ class SnippetsContainer(root: Path, oldRoot: Path) {
     val filePath = inputsFile(snippetId)
     val attr = Files.readAttributes(filePath, classOf[BasicFileAttributes])
 
-    return attr.creationTime().toMillis()
+    attr.creationTime().toMillis
   }
 
   private def readInputs(snippetId: SnippetId): Option[Inputs] = {
@@ -320,14 +320,13 @@ class SnippetsContainer(root: Path, oldRoot: Path) {
 
           baseVersion
         }
-        case None => {
+        case None =>
           val anon = root.resolve(anonFolder)
           if (!Files.exists(anon)) Files.createDirectory(anon)
 
           val base = anon.resolve(snippetId.base64UUID)
           if (!Files.exists(base)) Files.createDirectory(base)
           base
-        }
       }
 
     baseDirectory.resolve(Paths.get(fileName))
@@ -359,7 +358,7 @@ class SnippetsContainer(root: Path, oldRoot: Path) {
   private def deleteEmptyDirectories(base: Path): Unit = {
     def dirIsEmpty(dir: Path): Boolean = {
       val ds = Files.newDirectoryStream(dir)
-      val ret = ds.iterator().hasNext()
+      val ret = ds.iterator().hasNext
       ds.close()
       !ret
     }

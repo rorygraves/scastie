@@ -5,8 +5,6 @@ import org.scalajs.sbtplugin.JSModuleID
 import org.scalajs.sbtplugin.cross.CrossProject
 import org.scalajs.sbtplugin.ScalaJSPlugin.AutoImport.{jsEnv, scalaJSStage}
 import sbt.Keys._
-import scala.util.Try
-import java.io.FileNotFoundException
 
 lazy val orgSettings = Seq(
   organization := "org.scastie",
@@ -71,7 +69,7 @@ lazy val baseSettings = Seq(
 
 lazy val loggingAndTest =
   libraryDependencies ++= Seq(
-    "ch.qos.logback" % "logback-classic" % "1.1.7",
+    "ch.qos.logback" % "logback-classic" % "1.2.3",
     "com.typesafe.scala-logging" %% "scala-logging" % "3.5.0",
     "com.getsentry.raven" % "raven-logback" % "8.0.3",
     "org.scalatest" %% "scalatest" % scalaTestVersion % "test"
@@ -131,6 +129,7 @@ lazy val runnerRuntimeDependencies = Seq(
 
 lazy val sbtRunner = project
   .in(file("sbt-runner"))
+  .in(file("sbt-runner"))
   .settings(baseSettings)
   .settings(loggingAndTest)
   .settings(
@@ -176,9 +175,12 @@ lazy val sbtRunner = project
         val logbackConfDestination = "/root/logback.xml"
 
         new Dockerfile {
-          from("scalacenter/scastie-docker-sbt:0.0.25")
+          from("scalacenter/scastie-docker-sbt:0.0.26")
 
           add(ivy / "local" / org, s"/root/.ivy2/local/$org")
+          user("ensime")
+          add(ivy / "local" / org, s"/home/ensime/.ivy2/local/$org")
+          user("root")
 
           add(artifact, artifactTargetPath)
 
@@ -204,7 +206,7 @@ lazy val sbtRunner = project
       .dependsOn(runnerRuntimeDependencies: _*)
       .evaluated
   )
-  .dependsOn(api212JVM, instrumentation, utils)
+  .dependsOn(api212JVM, instrumentation, utils, backendApi)
   .enablePlugins(sbtdocker.DockerPlugin, BuildInfoPlugin)
 
 lazy val server = project
@@ -241,7 +243,7 @@ lazy val balancer = project
       "net.lingala.zip4j" % "zip4j" % "1.3.1"
     )
   )
-  .dependsOn(api212JVM, utils, instrumentation)
+  .dependsOn(api212JVM, utils, instrumentation, backendApi)
 
 /* codemirror is a facade to the javascript rich editor codemirror*/
 lazy val codemirror = project
@@ -335,8 +337,22 @@ lazy val instrumentation = project
   )
   .dependsOn(api212JVM, utils)
 
+lazy val backendApi = project
+  .in(file("backend-api"))
+  .settings(baseSettings)
+  .settings(loggingAndTest)
+  .settings(
+    libraryDependencies ++= Seq(
+      akka("actor")
+    )
+  )
+  .dependsOn(api212JVM, utils)
+
+
+
 def crossDir(projectId: String) = file(".cross/" + projectId)
 def dash(name: String) = name.replaceAllLiterally(".", "-")
+
 
 /* api is for the communication between sbt <=> server <=> frontend */
 def api(scalaV: String) = {
